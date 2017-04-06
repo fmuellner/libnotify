@@ -4,6 +4,7 @@
  * Copyright (C) 2006 John Palmieri
  * Copyright (C) 2010 Red Hat, Inc.
  * Copyright © 2010 Christian Persch
+ * Copyright (C) 2017 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -26,7 +27,9 @@
 #include <gio/gio.h>
 
 #include "notify.h"
+#include "proxy.h"
 #include "internal.h"
+#include "notification-private.h"
 
 
 /**
@@ -61,35 +64,6 @@ typedef struct
         gpointer             user_data;
 
 } CallbackPair;
-
-struct _NotifyNotificationPrivate
-{
-        guint32         id;
-        char           *app_name;
-        char           *summary;
-        char           *body;
-
-        /* NULL to use icon data. Anything else to have server lookup icon */
-        char           *icon_name;
-
-        /*
-         * -1   = use server default
-         *  0   = never timeout
-         *  > 0 = Number of milliseconds before we timeout
-         */
-        gint            timeout;
-
-        GSList         *actions;
-        GHashTable     *action_map;
-        GHashTable     *hints;
-
-        gboolean        has_nondefault_actions;
-        gboolean        updates_pending;
-
-        gulong          proxy_signal_handler;
-
-        gint            closed_reason;
-};
 
 enum
 {
@@ -372,7 +346,7 @@ notify_notification_finalize (GObject *object)
 {
         NotifyNotification        *obj = NOTIFY_NOTIFICATION (object);
         NotifyNotificationPrivate *priv = obj->priv;
-        GDBusProxy                *proxy;
+        NotifyProxy               *proxy;
 
         _notify_cache_remove_notification (obj);
 
@@ -393,8 +367,14 @@ notify_notification_finalize (GObject *object)
                 g_hash_table_destroy (priv->hints);
 
         proxy = _notify_get_proxy (NULL);
-        if (proxy != NULL && priv->proxy_signal_handler != 0) {
-                g_signal_handler_disconnect (proxy, priv->proxy_signal_handler);
+        if (proxy) {
+                if (priv->proxy_closed_handler != 0)
+                        g_signal_handler_disconnect (proxy, priv->proxy_closed_handler);
+                priv->proxy_closed_handler = 0;
+
+                if (priv->proxy_action_invoked_handler != 0)
+                        g_signal_handler_disconnect (proxy, priv->proxy_action_invoked_handler);
+                priv->proxy_action_invoked_handler = 0;
         }
 
         g_free (obj->priv);
@@ -492,48 +472,45 @@ notify_notification_update (NotifyNotification *notification,
 }
 
 static void
-proxy_g_signal_cb (GDBusProxy *proxy,
-                   const char *sender_name,
-                   const char *signal_name,
-                   GVariant   *parameters,
-                   NotifyNotification *notification)
+proxy_closed_cb (NotifyProxy *proxy,
+                 guint32      id,
+                 guint32      reason,
+                 NotifyNotification *notification)
 {
         g_return_if_fail (NOTIFY_IS_NOTIFICATION (notification));
 
-        if (g_strcmp0 (signal_name, "NotificationClosed") == 0 &&
-            g_variant_is_of_type (parameters, G_VARIANT_TYPE ("(uu)"))) {
-                guint32 id, reason;
+        if (id != notification->priv->id)
+                return;
 
-                g_variant_get (parameters, "(uu)", &id, &reason);
-                if (id != notification->priv->id)
-                        return;
+        g_object_ref (G_OBJECT (notification));
+        notification->priv->closed_reason = reason;
+        g_signal_emit (notification, signals[SIGNAL_CLOSED], 0);
+        notification->priv->id = 0;
+        g_object_unref (G_OBJECT (notification));
+}
 
-                g_object_ref (G_OBJECT (notification));
-                notification->priv->closed_reason = reason;
-                g_signal_emit (notification, signals[SIGNAL_CLOSED], 0);
-                notification->priv->id = 0;
-                g_object_unref (G_OBJECT (notification));
-        } else if (g_strcmp0 (signal_name, "ActionInvoked") == 0 &&
-                   g_variant_is_of_type (parameters, G_VARIANT_TYPE ("(us)"))) {
-                guint32 id;
-                const char *action;
-                CallbackPair *pair;
+static void
+proxy_action_invoked_cb (NotifyProxy *proxy,
+                         guint32      id,
+                         const char  *action,
+                 NotifyNotification *notification)
+{
+        CallbackPair *pair;
 
-                g_variant_get (parameters, "(u&s)", &id, &action);
+        g_return_if_fail (NOTIFY_IS_NOTIFICATION (notification));
 
-                if (id != notification->priv->id)
-                        return;
+        if (id != notification->priv->id)
+                return;
 
-                pair = (CallbackPair *) g_hash_table_lookup (notification->priv->action_map,
-                                                            action);
+        pair = (CallbackPair *) g_hash_table_lookup (notification->priv->action_map,
+                                                     action);
 
-                if (pair == NULL) {
-                        if (g_ascii_strcasecmp (action, "default")) {
-                                g_warning ("Received unknown action %s", action);
-                        }
-                } else {
-                        pair->cb (notification, (char *) action, pair->user_data);
+        if (pair == NULL) {
+                if (g_ascii_strcasecmp (action, "default")) {
+                        g_warning ("Received unknown action %s", action);
                 }
+        } else {
+                pair->cb (notification, (char *) action, pair->user_data);
         }
 }
 
@@ -552,12 +529,7 @@ notify_notification_show (NotifyNotification *notification,
                           GError            **error)
 {
         NotifyNotificationPrivate *priv;
-        GDBusProxy                *proxy;
-        GVariantBuilder            actions_builder, hints_builder;
-        GSList                    *l;
-        GHashTableIter             iter;
-        gpointer                   key, data;
-        GVariant                  *result;
+        NotifyProxy                *proxy;
 
         g_return_val_if_fail (notification != NULL, FALSE);
         g_return_val_if_fail (NOTIFY_IS_NOTIFICATION (notification), FALSE);
@@ -574,54 +546,22 @@ notify_notification_show (NotifyNotification *notification,
                 return FALSE;
         }
 
-        if (priv->proxy_signal_handler == 0) {
-                priv->proxy_signal_handler = g_signal_connect (proxy,
-                                                               "g-signal",
-                                                               G_CALLBACK (proxy_g_signal_cb),
+        if (priv->proxy_closed_handler == 0) {
+                priv->proxy_closed_handler = g_signal_connect (proxy,
+                                                               "closed",
+                                                               G_CALLBACK (proxy_closed_cb),
                                                                notification);
         }
 
-        g_variant_builder_init (&actions_builder, G_VARIANT_TYPE ("as"));
-        for (l = priv->actions; l != NULL; l = l->next) {
-                g_variant_builder_add (&actions_builder, "s", l->data);
-        }
-
-        g_variant_builder_init (&hints_builder, G_VARIANT_TYPE ("a{sv}"));
-        g_hash_table_iter_init (&iter, priv->hints);
-        while (g_hash_table_iter_next (&iter, &key, &data)) {
-                g_variant_builder_add (&hints_builder, "{sv}", key, data);
+        if (priv->proxy_action_invoked_handler == 0) {
+                priv->proxy_action_invoked_handler = g_signal_connect (proxy,
+                                                                       "action-invoked",
+                                                                       G_CALLBACK (proxy_action_invoked_cb),
+                                                                       notification);
         }
 
         /* TODO: make this nonblocking */
-        result = g_dbus_proxy_call_sync (proxy,
-                                         "Notify",
-                                         g_variant_new ("(susssasa{sv}i)",
-                                                        priv->app_name ? priv->app_name : notify_get_app_name (),
-                                                        priv->id,
-                                                        priv->icon_name ? priv->icon_name : "",
-                                                        priv->summary ? priv->summary : "",
-                                                        priv->body ? priv->body : "",
-                                                        &actions_builder,
-                                                        &hints_builder,
-                                                        priv->timeout),
-                                         G_DBUS_CALL_FLAGS_NONE,
-                                         -1 /* FIXME ? */,
-                                         NULL,
-                                         error);
-        if (result == NULL) {
-                return FALSE;
-        }
-        if (!g_variant_is_of_type (result, G_VARIANT_TYPE ("(u)"))) {
-                g_variant_unref (result);
-                g_set_error (error, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS,
-                             "Unexpected reply type");
-                return FALSE;
-        }
-
-        g_variant_get (result, "(u)", &priv->id);
-        g_variant_unref (result);
-
-        return TRUE;
+        return notify_proxy_add_notification (proxy, notification, NULL, error);
 }
 
 /**
@@ -1083,14 +1023,10 @@ gboolean
 notify_notification_close (NotifyNotification *notification,
                            GError            **error)
 {
-        NotifyNotificationPrivate *priv;
-        GDBusProxy  *proxy;
-        GVariant   *result;
+        NotifyProxy *proxy;
 
         g_return_val_if_fail (NOTIFY_IS_NOTIFICATION (notification), FALSE);
         g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
-
-        priv = notification->priv;
 
         proxy = _notify_get_proxy (error);
         if (proxy == NULL) {
@@ -1098,20 +1034,7 @@ notify_notification_close (NotifyNotification *notification,
         }
 
         /* FIXME: make this nonblocking! */
-        result = g_dbus_proxy_call_sync (proxy,
-                                         "CloseNotification",
-                                         g_variant_new ("(u)", priv->id),
-                                         G_DBUS_CALL_FLAGS_NONE,
-                                         -1 /* FIXME! */,
-                                         NULL,
-                                         error);
-        if (result == NULL) {
-                return FALSE;
-        }
-
-        g_variant_unref (result);
-
-        return TRUE;
+        return notify_proxy_remove_notification (proxy, notification, NULL, error);
 }
 
 /**

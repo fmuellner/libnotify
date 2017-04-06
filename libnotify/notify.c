@@ -34,6 +34,7 @@
 #include "notify.h"
 #include "internal.h"
 #include "notify-marshal.h"
+#include "proxy.h"
 
 /**
  * SECTION:notify
@@ -43,7 +44,7 @@
 
 static gboolean         _initted = FALSE;
 static char            *_app_name = NULL;
-static GDBusProxy      *_proxy = NULL;
+static NotifyProxy     *_proxy = NULL;
 static GList           *_active_notifications = NULL;
 static int              _spec_version_major = 0;
 static int              _spec_version_minor = 0;
@@ -66,38 +67,20 @@ _notify_get_server_info (char **ret_name,
                          char **ret_spec_version,
                          GError **error)
 {
-        GDBusProxy *proxy;
-        GVariant   *result;
+        NotifyProxy *proxy;
 
         proxy = _notify_get_proxy (error);
         if (proxy == NULL) {
                 return FALSE;
         }
 
-        result = g_dbus_proxy_call_sync (proxy,
-                                         "GetServerInformation",
-                                         g_variant_new ("()"),
-                                         G_DBUS_CALL_FLAGS_NONE,
-                                         -1 /* FIXME shorter timeout? */,
-                                         NULL,
-                                         error);
-        if (result == NULL) {
-                return FALSE;
-        }
-        if (!g_variant_is_of_type (result, G_VARIANT_TYPE ("(ssss)"))) {
-                g_variant_unref (result);
-                g_set_error (error, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS,
-                             "Unexpected reply type");
-                return FALSE;
-        }
-
-        g_variant_get (result, "(ssss)",
-                       ret_name,
-                       ret_vendor,
-                       ret_version,
-                       ret_spec_version);
-        g_variant_unref (result);
-        return TRUE;
+        return notify_proxy_get_server_info (proxy,
+                                             ret_name,
+                                             ret_vendor,
+                                             ret_version,
+                                             ret_spec_version,
+                                             NULL,
+                                             error);
 }
 
 static gboolean
@@ -229,25 +212,18 @@ notify_is_initted (void)
  * _notify_get_proxy:
  * @error: (allow-none): a location to store a #GError, or %NULL
  *
- * Synchronously creates the #GDBusProxy for the notification service,
+ * Synchronously creates the #NotifyProxy for the notification service,
  * and caches the result.
  *
- * Returns: the #GDBusProxy for the notification service, or %NULL on error
+ * Returns: the #NotifyProxy for the notification service, or %NULL on error
  */
-GDBusProxy *
+NotifyProxy *
 _notify_get_proxy (GError **error)
 {
         if (_proxy != NULL)
                 return _proxy;
 
-        _proxy = g_dbus_proxy_new_for_bus_sync (G_BUS_TYPE_SESSION,
-                                                G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES,
-                                                NULL,
-                                                NOTIFY_DBUS_NAME,
-                                                NOTIFY_DBUS_CORE_OBJECT,
-                                                NOTIFY_DBUS_CORE_INTERFACE,
-                                                NULL,
-                                                error);
+        _proxy = notify_proxy_new (NULL, error);
         if (_proxy == NULL) {
                 return NULL;
         }
@@ -274,10 +250,7 @@ _notify_get_proxy (GError **error)
 GList *
 notify_get_server_caps (void)
 {
-        GDBusProxy *proxy;
-        GVariant   *result;
-        char      **cap, **caps;
-        GList      *list = NULL;
+        NotifyProxy *proxy;
 
         proxy = _notify_get_proxy (NULL);
         if (proxy == NULL) {
@@ -285,31 +258,7 @@ notify_get_server_caps (void)
                 return NULL;
         }
 
-        result = g_dbus_proxy_call_sync (proxy,
-                                         "GetCapabilities",
-                                         g_variant_new ("()"),
-                                         G_DBUS_CALL_FLAGS_NONE,
-                                         -1 /* FIXME shorter timeout? */,
-                                         NULL,
-                                         NULL);
-        if (result == NULL) {
-                return NULL;
-        }
-        if (!g_variant_is_of_type (result, G_VARIANT_TYPE ("(as)"))) {
-                g_variant_unref (result);
-                return NULL;
-        }
-
-        g_variant_get (result, "(^as)", &caps);
-
-        for (cap = caps; *cap != NULL; cap++) {
-                list = g_list_prepend (list, *cap);
-        }
-
-        g_free (caps);
-        g_variant_unref (result);
-
-        return g_list_reverse (list);
+        return notify_proxy_get_server_capabilities (proxy, NULL, NULL);
 }
 
 /**

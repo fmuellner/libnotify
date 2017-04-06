@@ -28,7 +28,9 @@
 
 G_BEGIN_DECLS
 
-GDBusProxy      * _notify_get_proxy                         (GError **error);
+#include "proxy.h"
+
+NotifyProxy     * _notify_get_proxy                         (GError **error);
 
 void            _notify_cache_add_notification              (NotifyNotification       *n);
 void            _notify_cache_remove_notification           (NotifyNotification       *n);

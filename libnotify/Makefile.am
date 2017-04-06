@@ -24,8 +24,10 @@ notifyinc_HEADERS = \
 	$(ENUM_FILE).h
 
 noinst_HEADERS = \
+	notification-private.h \
 	notify-marshal.h \
-	internal.h
+	internal.h \
+	proxy.h
 
 BUILT_SOURCES = \
 	$(ENUM_FILE).h \
@@ -37,7 +39,8 @@ libnotify_la_SOURCES = \
 	notify.c \
 	notification.c \
 	notify-enum-types.c \
-	notify-marshal.c
+	notify-marshal.c \
+	proxy.c
 
 libnotify_la_LIBADD = \
 	$(PACKAGE_LIBS)
