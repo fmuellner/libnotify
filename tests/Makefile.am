@@ -2,7 +2,7 @@ INCLUDES = \
 	-I$(top_srcdir) \
 	$(TESTS_CFLAGS)
 
-noinst_PROGRAMS = \
+bin_PROGRAMS = \
 	test-replace \
 	test-replace-widget \
 	test-server-info \
