@@ -1,0 +1,26 @@
+{
+    "app-id": "com.github.fmuellner.NotifyTest",
+    "runtime": "org.gnome.Platform",
+    "runtime-version": "master",
+    "sdk": "org.gnome.Sdk",
+    "command": "notify-send",
+    "tags": ["nightly"],
+    "finish-args": [
+    ],
+    "build-options": {
+        "cflags": "-O2 -g"
+    },
+    "modules": [
+        {
+            "name": "libnotify",
+            "config-opts": ["--disable-static"],
+            "sources": [
+                {
+                    "type": "git",
+                    "url": "https://github.com/fmuellner/libnotify"
+                }
+            ]
+        }
+    ]
+}
+

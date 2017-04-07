@@ -8,6 +8,10 @@ endif
 pcdata_DATA = libnotify.pc
 pcdatadir = $(libdir)/pkgconfig
 
+desktopdir = $(datadir)/applications
+desktop_DATA = flatpak/org.gnome.fmuellner.NotifyTest.desktop
+
+
 EXTRA_DIST = \
 	AUTHORS NEWS INSTALL COPYING README \
 	ChangeLog \

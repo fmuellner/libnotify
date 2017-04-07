@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+Name=Notification Test
+Exec=notify-send Test
